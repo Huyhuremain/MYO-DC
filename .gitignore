@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Environment (giữ .env.example làm template)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code / OMC
+.claude/
+.omc/
+.gemini/
+
+# Logs
+*.log
+logs/
+
+# Runtime data / local notes
+data/memory/MEMORY.md
+data/memory/vectors.json
+data/documents/
+Long_*.md
+
+# Build / Coverage (Phase 3+)
+dist/
+coverage/
