@@ -8,6 +8,9 @@ const DATA_DIR = path.join(ROOT_DIR, 'data');
 const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 const MEMORY_FILE = path.join(MEMORY_DIR, 'MEMORY.md');
 
+// SQLite database
+const DB_FILE = path.join(DATA_DIR, 'daisyclaw.db');
+
 // Paths cho logs (Phase 3)
 const LOGS_DIR = path.join(DATA_DIR, 'logs');
 
@@ -16,5 +19,6 @@ module.exports = {
   DATA_DIR,
   MEMORY_DIR,
   MEMORY_FILE,
+  DB_FILE,
   LOGS_DIR,
 };

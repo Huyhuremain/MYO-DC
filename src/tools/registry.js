@@ -5,6 +5,7 @@ const ingestDocument = require('./ingest_document');
 const webScraper = require('./web_scraper');
 const fileReader = require('./file_reader');
 const visionOcr = require('./vision_ocr');
+const manageWatchedUrls = require('./manage_watched_urls');
 
 // Map tên tool -> module
 const tools = {
@@ -15,18 +16,13 @@ const tools = {
   web_scraper: webScraper,
   file_reader: fileReader,
   vision_ocr: visionOcr,
+  manage_watched_urls: manageWatchedUrls,
 };
 
-/**
- * Lấy danh sách definitions cho OpenAI function calling
- */
 function getToolDefinitions() {
   return Object.values(tools).map(t => t.definition);
 }
 
-/**
- * Thực thi tool theo tên, truyền arguments đã parse
- */
 async function executeTool(name, args) {
   const tool = tools[name];
   if (!tool) {

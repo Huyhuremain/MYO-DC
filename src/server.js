@@ -1,25 +1,11 @@
-/**
- * ===================================================
- * DAISYCLAW — Server Entry Point (API + Bot Gateway)
- * ===================================================
- *
- * Chạy: npm run server
- *
- * Entry point này khởi động:
- *   1. Express API server (POST /api/chat)
- *   2. Telegram bot (nếu có TELEGRAM_BOT_TOKEN)
- *   3. Discord bot (Phase 3, nếu có DISCORD_BOT_TOKEN)
- *
- * Khác với src/index.js (terminal mode), file này dành cho
- * production và bot gateway.
- */
-
 require('dotenv').config();
 
 const { loadConfig } = require('./config');
 const Agent = require('./core/agent');
 const { startServer } = require('./api');
 const { startBots } = require('./bot_gateway');
+const { startScheduler } = require('./core/crawler/scheduler');
+const { initCrawler } = require('./tools/manage_watched_urls');
 
 async function main() {
   // 1. Load config
@@ -31,7 +17,7 @@ async function main() {
     process.exit(1);
   }
 
-  // 2. Khởi tạo Agent (dùng chung cho API + Bot)
+  // 2. Khởi tạo Agent
   const agent = new Agent(config);
 
   console.log('=================================');
@@ -40,10 +26,25 @@ async function main() {
   console.log('  Mode: Server (API + Bot)');
   console.log('=================================\n');
 
-  // 3. Start API server
+  // 3. Inject crawler client vào manage_watched_urls tool
+  // [FIX] Bỏ config.llm.model — crawler không dùng LLM nữa
+  initCrawler(
+    agent.embeddingClient,
+    config.embedding?.model || 'text-embedding-3-small'
+  );
+
+  // 4. Khởi động scheduler crawl tự động (7 sáng mỗi ngày)
+  // [FIX] Bỏ config.llm.model — crawler không dùng LLM nữa
+  startScheduler(
+    agent.embeddingClient,
+    config.embedding?.model || 'text-embedding-3-small',
+    '0 7 * * *'
+  );
+
+  // 5. Start API server
   await startServer(config, agent);
 
-  // 4. Start bot gateway
+  // 6. Start bot gateway
   await startBots(config, agent);
 }
 

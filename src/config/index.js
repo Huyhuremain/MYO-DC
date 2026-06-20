@@ -60,8 +60,12 @@ function loadConfig() {
     },
 
     // Semantic memory / Embedding settings (DL1)
+    // [FIX] Thêm apiKey + baseURL riêng cho embedding.
+    // Nếu không set EMBEDDING_API_KEY/EMBEDDING_BASE_URL, fallback dùng
+    // chung với LLM (giữ backward compat cho provider hỗ trợ cả 2 qua 1 endpoint).
     embedding: {
-      provider: process.env.EMBEDDING_PROVIDER || 'openai',
+      apiKey: process.env.EMBEDDING_API_KEY || apiKey,
+      baseURL: process.env.EMBEDDING_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
       model: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
       topK: parseIntSafe(process.env.SEMANTIC_MEMORY_TOP_K, 3, 'SEMANTIC_MEMORY_TOP_K'),
       minScore: parseFloat(process.env.SEMANTIC_MEMORY_MIN_SCORE || '0.5'),

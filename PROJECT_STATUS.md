@@ -1,280 +1,178 @@
-# DAISYCLAW — PROJECT STATUS
+# DaisyClaw — Project Status
 
-> File này lưu lại trạng thái, tiến độ và kiến trúc hiện tại của dự án.
-> Cập nhật lần cuối: 2026-04-11
-
----
-
-## 1. Tổng quan
-
-| Mục | Giá trị |
-|-----|---------|
-| Tên dự án | DaisyClaw — Tác tử AI cá nhân |
-| Phiên bản | 1.0.0 |
-| Runtime | Node.js (CommonJS) |
-| LLM Provider | OpenAI-compatible API (`chiasegpu.vn`) |
-| Model hiện tại | `gemma-4-31b-it` |
-| Entry point (terminal) | `src/index.js` |
-| Entry point (server) | `src/server.js` |
-| Chạy terminal | `npm start` |
-| Chạy server | `npm run server` |
+> Cập nhật lần cuối: 2026-06-20
 
 ---
 
-## 2. Tiến độ Roadmap
+## Tổng quan
 
-| Phase | Mô tả | Trạng thái |
-|-------|--------|------------|
-| **Phase 1** | Lõi AI: ReAct loop + Tools cơ bản + Terminal | **DONE** |
-| **Phase 2** | Express API Server + Bot Telegram Gateway | **SKELETON DONE** |
-| **Phase 3** | Tools nâng cao (Vision, Web Scraping) + QA | TODO |
+**DaisyClaw** là personal AI agent chạy local, xây dựng bằng Node.js. Single-user, chạy trên Windows local, giao tiếp qua Web UI (React) và Telegram Bot.
 
-### Phase 1 — Chi tiết hoàn thành
-
-- [x] Centralized config system (`src/config/`)
-- [x] API Contract / Protocol (`src/protocol/`)
-- [x] ReAct loop với OpenAI function calling (`src/core/agent.js`)
-- [x] System prompt + inject long-term memory (`src/core/prompts.js`)
-- [x] Short-term memory — sliding window 10 msg (`src/core/memory/short_term.js`)
-- [x] Long-term memory — đọc/ghi `data/memory/MEMORY.md` (`src/core/memory/long_term.js`)
-- [x] Tool: `calculator` — mathjs safe eval
-- [x] Tool: `get_current_time` — UTC+7
-- [x] Tool: `save_memory` — ghi vào MEMORY.md
-- [x] Tool registry + executor (`src/tools/registry.js`)
-- [x] Terminal runner (`src/index.js`)
-
-### Phase 2 — Skeleton done, Khoẻ tiếp tục phát triển
-
-- [x] Tạo `src/api/server.js` — Express.js wrap Agent (skeleton)
-- [x] Endpoint `POST /api/chat` — nhận `{ message, source }`, trả `{ status, data }` (skeleton)
-- [x] Middleware auth: `Authorization: Bearer <SECRET_TOKEN>` (skeleton)
-- [x] Tạo `src/bot_gateway/telegram.js` — Telegraf bot (skeleton)
-- [x] Tạo `src/server.js` — Entry point server mode
-- [x] Config: thêm telegram/discord token vào loadConfig()
-- [ ] Khoẻ: Test API server với `npm run server` + `curl`
-- [ ] Khoẻ: Cấu hình TELEGRAM_BOT_TOKEN trong `.env` + test bot
-- [ ] Khoẻ: Thêm error handling middleware (`src/api/middleware/error.js`)
-- [ ] Khoẻ: Rate limiting + security hardening
-- [ ] Khoẻ: Discord bot (`src/bot_gateway/discord.js`)
-
-### Phase 3 — Việc cần làm
-
-- [ ] Tool: Vision/OCR — xử lý ảnh hóa đơn, tài liệu
-- [ ] Tool: File Reader — đọc .pdf, .docx
-- [ ] Tool: Web Scraper — trích xuất nội dung từ URL
-- [ ] Kiểm thử tự động (test suite)
-- [ ] Tinh chỉnh System Prompt chống ảo giác
-- [ ] Báo cáo bảo vệ
+**Stack chính**: Node.js (CommonJS) · Express 5 · SQLite (better-sqlite3) · Gemini 2.5 Flash (LLM) · OpenAI text-embedding-3-small (Embedding) · React + Vite
 
 ---
 
-## 3. Cấu trúc thư mục hiện tại
+## Trạng thái các tính năng
+
+### ✅ Hoàn thành & hoạt động
+
+| Tính năng | Mô tả |
+|---|---|
+| **ReAct Loop** | Tool execution, streaming SSE, multi-round |
+| **SQLite** | Thay thế JSON files, migration an toàn |
+| **Memory System** | Short-term (RAM), Long-term (MEMORY.md), Semantic (vectors), Compaction |
+| **Memory Types** | fact / preference / behavior / context — LLM tự phân loại |
+| **RAG** | Chunk + embed + cosine search, keyword fallback khi embedding tắt |
+| **Web Crawler** | node-cron 7h sáng, tool manage_watched_urls (6 actions) |
+| **Multi-Agent** | Intent classifier → SearchAgent / AnalysisAgent / Orchestrator |
+| **Conversation Summary** | Auto-save sau mỗi session ≥ 4 tin nhắn |
+| **Embedding riêng** | OpenAI text-embedding-3-small tách biệt với Gemini LLM |
+| **Multi-provider** | ProviderRouter với fallback chain |
+| **Web UI** | React + Vite, chat, upload ảnh OCR, health check |
+
+### ⚠️ Hoạt động nhưng có vấn đề
+
+| Tính năng | Vấn đề | Hướng fix |
+|---|---|---|
+| **SearchAgent** | Không nhất quán — không có Search API thật, chỉ có web_scraper đọc URL cụ thể | Tích hợp Brave/DuckDuckGo/SerpAPI |
+| **AnalysisAgent** | Đôi khi hỏi xin phép tìm web thay vì dùng kiến thức nền | Tinh chỉnh system prompt |
+| **RAG từ crawler** | Documents bị trùng do makeDocName() còn timestamp | Bỏ timestamp, cleanup DB cũ |
+| **Intent classifier** | Câu hỏi về watched URLs bị classify là `search` thay vì `chat` | Đã sửa intent.js |
+
+### ⬜ Chưa làm
+
+| Tính năng | Ghi chú |
+|---|---|
+| **Retry 429** | agent.js chưa có retry riêng cho status 429 |
+| **Search API thật** | Brave/DuckDuckGo/SerpAPI cho SearchAgent |
+| **Memory Agent** | Lưu kết quả sub-agents có cấu trúc |
+| **Memory deduplication** | Tránh lưu trùng thông tin |
+| **Memory cleanup** | Xóa memories cũ/lỗi thời |
+| **Discord bot** | Gateway thứ 3 sau Web UI và Telegram |
+| **Cache intent** | Skip classify cho message ngắn < 10 từ |
+
+---
+
+## Kiến trúc
 
 ```
-DA-DaisyClaw/
-├── .env                              # API keys (gitignored)
-├── .gitignore
-├── package.json
-├── OpenClawClone.md                  # Tài liệu tham khảo OpenClaw
-├── TEAM_PLAN.md                      # Kế hoạch nhóm
-├── PROJECT_STATUS.md                 # << FILE NÀY
-│
-├── data/
-│   └── memory/
-│       └── MEMORY.md                 # Trí nhớ dài hạn (persistent)
-│
-└── src/
-    ├── index.js                      # Entry: terminal mode (npm start)
-    ├── server.js                     # Entry: API + Bot mode (npm run server)
-    │
-    ├── config/                       # Cấu hình tập trung
-    │   ├── index.js                  #   loadConfig() — validate env, trả object
-    │   └── paths.js                  #   Path constants: ROOT, DATA, MEMORY, LOGS
-    │
-    ├── protocol/                     # API Contract — 3 dev dùng chung
-    │   ├── types.js                  #   createRequest / createSuccessResponse / createErrorResponse
-    │   └── errors.js                 #   ErrorCodes (9 mã lỗi chuẩn)
-    │
-    ├── core/                         # DOMAIN: Lõi AI (Long)
-    │   ├── agent.js                  #   Class Agent — ReAct loop, OpenAI function calling
-    │   ├── prompts.js                #   buildSystemPrompt() — inject MEMORY.md
-    │   └── memory/
-    │       ├── index.js              #   Export { ShortTermMemory, longTerm }
-    │       ├── short_term.js         #   Sliding window (configurable, mặc định 10)
-    │       └── long_term.js          #   readMemory() / appendMemory() -> MEMORY.md
-    │
-    ├── api/                          # DOMAIN: API Server (Khoẻ)
-    │   ├── index.js                  #   Re-export { startServer }
-    │   ├── server.js                 #   Express app + startServer()
-    │   ├── middleware/
-    │   │   └── auth.js               #   Bearer token authentication
-    │   └── routes/
-    │       └── chat.js               #   POST /api/chat handler
-    │
-    ├── bot_gateway/                  # DOMAIN: Bot Gateway (Khoẻ)
-    │   ├── index.js                  #   startBots() — boot tất cả bot
-    │   └── telegram.js              #   Telegraf bot — nhận tin → gọi Agent
-    │
-    └── tools/                        # DOMAIN: Tools (Huy)
-        ├── index.js                  #   Re-export registry
-        ├── registry.js               #   Tool map + getToolDefinitions() + executeTool()
-        ├── calculator.js             #   mathjs evaluate — tính toán an toàn
-        ├── get_current_time.js       #   Thời gian VN (Asia/Ho_Chi_Minh)
-        └── save_memory.js            #   Ghi thông tin vào long-term memory
+React UI (5173) / Telegram Bot
+        ↓
+Express Server (3000) — auth middleware
+  POST /api/chat · GET /api/chat/stream · POST /api/upload
+        ↓
+Agent (Orchestrator)
+  ├── Intent Classifier → chat / search / analysis / multi
+  ├── SearchAgent (web_scraper, manage_watched_urls, get_current_time)
+  ├── AnalysisAgent (LLM only, no tools)
+  ├── Short-term memory + Compaction
+  ├── Semantic search + RAG inject
+  └── ReAct loop (max 10 rounds)
+        ↓
+Gemini 2.5 Flash (LLM) + OpenAI text-embedding-3-small (Embedding)
 ```
 
 ---
 
-## 4. Phân vùng làm việc (3 Dev)
+## Cấu trúc thư mục chính
 
 ```
-Long (Trùm Lõi AI)         -> src/core/  +  src/config/  +  src/protocol/  +  src/index.js
-Khoẻ (Trùm Giao Tiếp)     -> src/api/   +  src/bot_gateway/  +  src/server.js
-Huy  (Trùm Công Cụ)       -> src/tools/
+src/
+├── api/routes/          # chat.js, stream.js, upload.js
+├── core/
+│   ├── agent.js         # Orchestrator chính
+│   ├── base_agent.js    # Base class cho sub-agents
+│   ├── search_agent.js  # Web search specialist
+│   ├── analysis_agent.js # Analysis specialist
+│   ├── intent.js        # Intent classifier
+│   ├── prompts.js       # System prompt builder
+│   ├── crawler/         # crawler.js + scheduler.js
+│   ├── memory/          # short_term, long_term, semantic, compaction, conversation_summary
+│   └── rag/             # chunker, document_store, search
+└── tools/               # calculator, web_scraper, save_memory, manage_watched_urls, ...
 ```
-
-**Quy tắc tránh xung đột:**
-- Mỗi dev chỉ sửa trong domain của mình
-- Giao tiếp giữa module qua `protocol/` (types.js + errors.js)
-- Khoẻ import Agent qua `require('../core/agent')` — không sửa core
-- Huy thêm tool mới: tạo file + đăng ký trong `registry.js` — không sửa core
 
 ---
 
-## 5. API Contract
+## Database Schema (SQLite)
 
-### Request (Gateway -> Core)
-
-```json
-{
-  "message": "Tính dùm cái hóa đơn này",
-  "source": "telegram",
-  "timestamp": "2026-04-10T12:00:00.000Z"
-}
+```sql
+memories    -- id, type, text, vector, timestamp
+documents   -- filename, ingested_at, chunk_count
+chunks      -- id, filename, text, vector, chunk_index
+watched_urls -- url, label, schedule, active, added_at
+crawl_logs  -- id, url, crawled_at, content_hash, status, error_msg
 ```
-
-### Response thành công (Core -> Gateway)
-
-```json
-{
-  "status": "success",
-  "data": {
-    "reply_text": "Tổng hóa đơn là 500k nhé sếp!",
-    "tools_used": ["vision_ocr", "calculator"]
-  }
-}
-```
-
-### Response lỗi
-
-```json
-{
-  "status": "error",
-  "error": {
-    "code": "LLM_ERROR",
-    "message": "402 Insufficient credits"
-  }
-}
-```
-
-### Mã lỗi (ErrorCodes)
-
-| Code | Ý nghĩa |
-|------|---------|
-| INVALID_REQUEST | Request sai format |
-| UNAUTHORIZED | Thiếu/sai SECRET_TOKEN |
-| MISSING_MESSAGE | Không có message |
-| AGENT_ERROR | Lỗi xử lý Agent |
-| TOOL_ERROR | Lỗi chạy tool |
-| LLM_ERROR | Lỗi API LLM |
-| MAX_ROUNDS_EXCEEDED | Vượt quá 10 vòng ReAct |
-| CONFIG_ERROR | Lỗi cấu hình |
-| INTERNAL_ERROR | Lỗi hệ thống |
 
 ---
 
-## 6. Cấu hình (.env)
+## Config (.env) — cần thiết lập
 
 ```env
-OPENAI_API_KEY=sk-...              # Bắt buộc
-OPENAI_BASE_URL=https://...        # Tùy chọn (mặc định: api.openai.com)
-MODEL=gemma-4-31b-it               # Tùy chọn (mặc định: gpt-4o-mini)
-SHORT_TERM_MAX=10                  # Tùy chọn (sliding window)
-PORT=3000                          # Phase 2
-SECRET_TOKEN=                      # Phase 2
+# LLM
+OPENAI_API_KEY=        # Gemini API key
+OPENAI_BASE_URL=       # https://generativelanguage.googleapis.com/v1beta/openai/
+MODEL=                 # gemini-2.5-flash
+
+# Embedding (riêng biệt)
+EMBEDDING_API_KEY=     # OpenAI API key
+EMBEDDING_BASE_URL=    # https://api.openai.com/v1
+EMBEDDING_MODEL=       # text-embedding-3-small
+
+# Memory
+SHORT_TERM_MAX=10
+SEMANTIC_MEMORY_TOP_K=3
+SEMANTIC_MEMORY_MIN_SCORE=0.5
+
+# Compaction
+COMPACTION_THRESHOLD=8
+COMPACTION_KEEP_RECENT=2
+
+# RAG
+RAG_TOP_K=5
+RAG_CHUNK_SIZE=500
+RAG_CHUNK_OVERLAP=50
+RAG_MIN_SCORE=0.5
+
+# Server
+PORT=3000
+SECRET_TOKEN=          # Random string để auth API
+TELEGRAM_BOT_TOKEN=    # Optional
 ```
 
 ---
 
-## 7. Dependencies
+## Chạy dự án
 
-| Package | Version | Dùng cho |
-|---------|---------|----------|
-| openai | ^6.33.0 | Gọi LLM API (function calling) |
-| dotenv | ^17.3.1 | Load .env |
-| mathjs | ^15.1.1 | Calculator tool |
-| express | ^5.2.1 | API Server |
-| cors | ^2.8.6 | CORS middleware |
-| telegraf | ^4.16.3 | Telegram bot |
+```powershell
+# Cài dependencies
+npm install
 
----
+# Chạy server
+node src/server.js
 
-## 8. NPM Scripts
+# Chạy tests
+$env:TEST_DB=":memory:"; node --max-old-space-size=4096 --test
 
-| Script | Lệnh | Mô tả |
-|--------|-------|-------|
-| `npm start` | `node src/index.js` | Chế độ terminal (dev/test) |
-| `npm run server` | `node src/server.js` | Chế độ server (API + Bot) |
-| `npm test` | — | Chưa có test suite |
-
----
-
-## 9. Hướng dẫn thêm Tool mới (cho Huy)
-
-1. Tạo file `src/tools/<ten_tool>.js`:
-
-```js
-const definition = {
-  type: 'function',
-  function: {
-    name: 'ten_tool',
-    description: 'Mô tả tool làm gì',
-    parameters: {
-      type: 'object',
-      properties: {
-        param1: { type: 'string', description: '...' }
-      },
-      required: ['param1']
-    }
-  }
-};
-
-async function execute({ param1 }) {
-  // Logic xử lý
-  return 'Kết quả';
-}
-
-module.exports = { definition, execute };
+# Chạy frontend (terminal khác)
+cd client && npm run dev
 ```
 
-2. Đăng ký trong `src/tools/registry.js`:
+---
 
-```js
-const tenTool = require('./ten_tool');
-const tools = {
-  // ... tools hiện có
-  ten_tool: tenTool,
-};
+## Test
+
+**68 tests pass** — intent (16), base_agent (17), sub_agents (19), orchestrator (16)
+
+```powershell
+$env:TEST_DB=":memory:"; node --max-old-space-size=4096 --test
 ```
-
-3. Xong. Agent tự động nhận tool mới.
 
 ---
 
-## 10. Vấn đề đã biết
+## Lưu ý quan trọng
 
-| # | Vấn đề | Mức độ | Ghi chú |
-|---|--------|--------|---------|
-| 1 | API trả 402 (hết credits) | Chặn | Cần nạp credits cho chiasegpu.vn |
-| 2 | Chưa có test suite | Thấp | Phase 3 sẽ bổ sung |
-| 3 | Chưa có logging ra file | Thấp | config/paths.js đã có LOGS_DIR sẵn |
+- CommonJS throughout — không dùng `import/export`
+- `data/` folder bị gitignore — cần tạo lại khi clone (`data/memory/`, `data/uploads/`)
+- Backup định kỳ: `data/daisyclaw.db` + `data/memory/MEMORY.md`
+- `SECRET_TOKEN` phải random, không commit lên git

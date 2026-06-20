@@ -47,7 +47,10 @@ test('Agent.chat handles missing choices[0].message', async () => {
   assert.equal(response.error.code, ErrorCodes.LLM_ERROR);
 });
 
-test('Agent.chat handles invalid tool JSON arguments', async () => {
+test('Agent.chat handles invalid tool JSON arguments gracefully', async () => {
+  // Sau khi fix: parse error KHÔNG crash session — agent báo lỗi cho LLM
+  // và tiếp tục loop đến MAX_ROUNDS_EXCEEDED thay vì dừng lại với TOOL_ERROR.
+  // Mock luôn trả tool_call với JSON lỗi → agent chạy hết 10 rounds.
   const agent = createAgentWithMockClient(async () => ({
     choices: [{
       message: {
@@ -67,8 +70,9 @@ test('Agent.chat handles invalid tool JSON arguments', async () => {
 
   const response = await agent.chat('calculate');
 
+  // Agent không crash — chạy hết rounds rồi mới dừng
   assert.equal(response.status, 'error');
-  assert.equal(response.error.code, ErrorCodes.TOOL_ERROR);
+  assert.equal(response.error.code, ErrorCodes.MAX_ROUNDS_EXCEEDED);
 });
 
 test('Agent.chat handles max rounds exceeded', async () => {
