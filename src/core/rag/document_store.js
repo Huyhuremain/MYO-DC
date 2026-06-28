@@ -1,84 +1,71 @@
+'use strict';
+
 const { getDb } = require('../db');
 const { DATA_DIR } = require('../../config/paths');
 const path = require('path');
+const crypto = require('crypto');
 
-// Giữ lại DOC_STORE_DIR để không break code nào đang import nó
 const DOC_STORE_DIR = path.join(DATA_DIR, 'documents');
 
-// ─── Cache layer ────────────────────────────────────────────────────────────
-// Giữ nguyên pattern cache từ bản JSON cũ — tránh đọc DB mỗi lần search.
-
-let _cache = null;      // Array<{ id, text, filename, chunk_index }>
+let _cache = null;
 let _cacheTime = 0;
-const CACHE_TTL = 60_000; // 1 phút
+const CACHE_TTL = 60_000;
 
-function _invalidateCache() {
-  _cache = null;
-  _cacheTime = 0;
-}
+function _invalidateCache() { _cache = null; _cacheTime = 0; }
 
-// ─── Compatibility shims (loadStore / saveStore) ─────────────────────────────
-// Hai hàm này từng dùng để đọc/ghi toàn bộ JSON.
-// Giờ không còn cần thiết nhưng giữ lại để không break import ở nơi khác.
-
-/**
- * @deprecated Dùng nội bộ — không cần gọi từ bên ngoài nữa.
- */
 function loadStore() {
   const db = getDb();
   const documents = db.prepare('SELECT * FROM documents').all();
   for (const doc of documents) {
-    doc.chunks = db
-      .prepare('SELECT * FROM chunks WHERE filename = ? ORDER BY chunk_index')
-      .all(doc.filename)
-      .map((c) => ({ ...c, vector: JSON.parse(c.vector) }));
+    doc.chunks = db.prepare(
+      'SELECT * FROM chunks WHERE doc_id = ? ORDER BY chunk_index'
+    ).all(doc.id).map(c => ({ ...c, vector: JSON.parse(c.vector) }));
   }
   return { documents };
 }
 
-/**
- * @deprecated Không dùng nữa — SQLite tự quản lý persistence.
- */
 function saveStore(_store) {
-  // No-op: SQLite tự persist, không cần làm gì thêm.
   console.warn('[DocumentStore] saveStore() không còn cần thiết với SQLite.');
 }
 
-// ─── Core API ────────────────────────────────────────────────────────────────
-
 /**
- * Lưu tài liệu đã chunk + vector vào store.
- * Nếu tài liệu đã tồn tại → xóa và ingest lại (re-ingest).
+ * Lưu document mới — KHÔNG ghi đè record cũ.
+ * Mỗi lần crawl/ingest = 1 record riêng biệt.
  *
  * @param {string} filename
- * @param {Array<{ id: string, text: string, vector: number[], index: number }>} chunks
- * @returns {number} Số chunks đã lưu
+ * @param {Array<{ id, text, vector, index }>} chunks
+ * @param {object} meta - { url, label, crawl_date }
+ * @returns {number} số chunks đã lưu
  */
-function saveDocument(filename, chunks) {
+function saveDocument(filename, chunks, meta = {}) {
   const db = getDb();
+  const docId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const crawlDate = meta.crawl_date || now.slice(0, 10); // 'YYYY-MM-DD'
+  const url = meta.url || '';
+  const label = meta.label || '';
 
-  // Dùng transaction — tất cả thành công hoặc không có gì thay đổi
   const upsert = db.transaction(() => {
-    // Xóa document cũ nếu re-ingest (ON DELETE CASCADE tự xóa chunks)
-    db.prepare('DELETE FROM documents WHERE filename = ?').run(filename);
-
-    // Insert document metadata
     db.prepare(`
-      INSERT INTO documents (filename, ingested_at, chunk_count)
-      VALUES (?, ?, ?)
-    `).run(filename, new Date().toISOString(), chunks.length);
+      INSERT INTO documents (id, filename, url, label, crawl_date, ingested_at, chunk_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(docId, filename, url, label, crawlDate, now, chunks.length);
 
-    // Insert từng chunk
     const insertChunk = db.prepare(`
-      INSERT INTO chunks (id, filename, text, vector, chunk_index)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO chunks (id, doc_id, filename, url, label, crawl_date, text, vector, chunk_index)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+
     for (const chunk of chunks) {
       insertChunk.run(
-        chunk.id,
+        `${docId}_${chunk.index ?? chunk.id}`,
+        docId,
         filename,
+        url,
+        label,
+        crawlDate,
         chunk.text,
-        JSON.stringify(chunk.vector),
+        JSON.stringify(chunk.vector || []),
         chunk.index ?? 0
       );
     }
@@ -86,33 +73,40 @@ function saveDocument(filename, chunks) {
 
   upsert();
   _invalidateCache();
-
   return chunks.length;
 }
 
 /**
- * Lấy tất cả chunks từ mọi tài liệu (dùng cho RAG search).
- * Có cache TTL 1 phút để tránh đọc DB mỗi request.
- *
- * @returns {Array<{ id, text, filename, vector: number[] }>}
+ * Lấy chunks cho RAG — chỉ lấy crawl_date MỚI NHẤT của mỗi URL.
+ * Fallback: nếu URL trống (ingest_document) → lấy tất cả.
  */
 function getAllChunks() {
   const now = Date.now();
-  if (_cache && now - _cacheTime < CACHE_TTL) {
-    return _cache;
-  }
+  if (_cache && now - _cacheTime < CACHE_TTL) return _cache;
 
   const db = getDb();
+
   const rows = db.prepare(`
-    SELECT c.id, c.text, c.filename, c.vector
+    SELECT c.id, c.text, c.filename, c.url, c.label, c.crawl_date, c.vector
     FROM chunks c
+    INNER JOIN documents d ON c.doc_id = d.id
+    WHERE
+      -- Với web documents: chỉ lấy crawl_date mới nhất của mỗi URL
+      (c.url = '' OR d.crawl_date = (
+        SELECT MAX(d2.crawl_date)
+        FROM documents d2
+        WHERE d2.url = d.url
+      ))
     ORDER BY c.filename, c.chunk_index
   `).all();
 
-  _cache = rows.map((row) => ({
+  _cache = rows.map(row => ({
     id: row.id,
     text: row.text,
     filename: row.filename,
+    url: row.url,
+    label: row.label,
+    crawl_date: row.crawl_date,
     vector: JSON.parse(row.vector),
   }));
   _cacheTime = now;
@@ -120,27 +114,13 @@ function getAllChunks() {
   return _cache;
 }
 
-/**
- * Liệt kê tài liệu đã ingest (không kèm chunks/vectors).
- *
- * @returns {Array<{ filename, ingestedAt, chunkCount }>}
- */
 function listDocuments() {
   const db = getDb();
-  return db.prepare('SELECT filename, ingested_at, chunk_count FROM documents').all()
-    .map((d) => ({
-      filename: d.filename,
-      ingestedAt: d.ingested_at,
-      chunkCount: d.chunk_count,
-    }));
+  return db.prepare(
+    'SELECT id, filename, url, label, crawl_date, ingested_at, chunk_count FROM documents ORDER BY ingested_at DESC'
+  ).all();
 }
 
-/**
- * Xóa tài liệu khỏi store (chunks tự xóa theo CASCADE).
- *
- * @param {string} filename
- * @returns {boolean} true nếu xóa thành công
- */
 function removeDocument(filename) {
   const db = getDb();
   const result = db.prepare('DELETE FROM documents WHERE filename = ?').run(filename);
@@ -149,12 +129,7 @@ function removeDocument(filename) {
 }
 
 module.exports = {
-  loadStore,
-  saveStore,
-  saveDocument,
-  getAllChunks,
-  listDocuments,
-  removeDocument,
-  DOC_STORE_DIR,
-  _invalidateCache, // dùng cho test
+  loadStore, saveStore, saveDocument,
+  getAllChunks, listDocuments, removeDocument,
+  DOC_STORE_DIR, _invalidateCache,
 };

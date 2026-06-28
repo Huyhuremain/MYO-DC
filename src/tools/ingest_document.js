@@ -85,7 +85,11 @@ async function execute({ filepath, chunk_size }) {
 
   // Save vào store
   const filename = path.basename(filepath);
-  const savedCount = saveDocument(filename, embeddedChunks);
+const savedCount = saveDocument(filename, embeddedChunks, {
+  url: '',
+  label: filename,
+  crawl_date: new Date().toISOString().slice(0, 10),
+});
 
   return `Đã nạp "${filename}": ${chunks.length} chunks, ${savedCount} đã lưu vào knowledge base.`;
 }

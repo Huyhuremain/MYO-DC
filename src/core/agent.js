@@ -3,7 +3,7 @@
 const OpenAI = require('openai');
 const { ShortTermMemory } = require('./memory');
 const { semanticMemory } = require('./memory');
-const { getToolDefinitions, executeTool } = require('../tools');
+const { getToolDefinitions, getChatToolDefinitions, executeTool } = require('../tools');
 const { buildSystemPrompt } = require('./prompts');
 const { createSuccessResponse, createErrorResponse } = require('../protocol/types');
 const { ErrorCodes } = require('../protocol/errors');
@@ -13,12 +13,40 @@ const { compaction } = require('./memory');
 const { ProviderRouter } = require('./provider_router');
 const { searchDocuments } = require('./rag/search');
 
-// [MULTI-AGENT] Import sub-agents và intent classifier
 const { classifyIntent } = require('./intent');
 const { SearchAgent } = require('./search_agent');
 const { AnalysisAgent } = require('./analysis_agent');
 
 const MAX_TOOL_ROUNDS = 10;
+
+// [FIX RETRY 429] Cấu hình retry riêng cho rate limit
+const RETRY_429_MAX_ATTEMPTS = 3;
+const RETRY_429_BASE_DELAY_MS = 5000; // 5s, 10s, 20s (exponential backoff)
+
+/**
+ * Kiểm tra xem error có phải do rate limit (429) không.
+ * Hỗ trợ nhiều cách OpenAI SDK / Gemini báo lỗi 429.
+ *
+ * @param {Error} err
+ * @returns {boolean}
+ */
+function is429Error(err) {
+  if (!err) return false;
+  if (err.status === 429) return true;
+  if (err.response?.status === 429) return true;
+  if (typeof err.message === 'string' && err.message.includes('429')) return true;
+  return false;
+}
+
+/**
+ * Đợi với thời gian tăng dần theo số lần thử (exponential backoff).
+ * @param {number} attempt - Lần thử thứ mấy (0-based)
+ */
+function delay429(attempt) {
+  const ms = RETRY_429_BASE_DELAY_MS * Math.pow(2, attempt);
+  console.log(`[Agent] Rate limited (429) — đợi ${ms / 1000}s rồi thử lại (lần ${attempt + 1}/${RETRY_429_MAX_ATTEMPTS})...`);
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Inject document context vào system prompt.
@@ -64,13 +92,12 @@ class Agent {
       this.model = config.llm.model;
     }
 
-    // Embedding client riêng biệt
-   this.embeddingClient = new OpenAI({
-  apiKey: config.embedding.apiKey,
-  baseURL: config.embedding.baseURL,
-  timeout: 15000,
-  maxRetries: 1,
-
+    // Embedding client riêng biệt — dùng config.embedding (key + baseURL riêng)
+    this.embeddingClient = new OpenAI({
+      apiKey: config.embedding.apiKey,
+      baseURL: config.embedding.baseURL,
+      timeout: 15000,
+      maxRetries: 1,
     });
 
     // Inject embedding client vào tools
@@ -107,68 +134,78 @@ class Agent {
   }
 
   // ---------------------------------------------------------------------------
-  // [MULTI-AGENT] Classify intent + build context string cho sub-agents
+  // [FIX RETRY 429] Wrapper gọi LLM non-streaming với retry riêng cho 429.
+  // Dùng chung cho ReAct loop trong chat().
   // ---------------------------------------------------------------------------
 
   /**
-   * Tóm tắt ngắn conversation history để truyền vào intent classifier.
-   * Chỉ lấy 3 turn gần nhất để tránh prompt quá dài.
-   * @returns {string}
+   * Gọi LLM completion với retry tự động khi gặp 429.
+   * Khác với provider fallback (đổi provider khác) — đây retry CÙNG provider
+   * sau khi đợi, vì 429 thường là tạm thời (rate limit theo phút).
+   *
+   * @param {object} client
+   * @param {object} params - Params truyền vào client.chat.completions.create()
+   * @returns {Promise<object>} response
+   * @throws {Error} nếu vượt quá số lần retry hoặc lỗi không phải 429
    */
+  async _callLLMWithRetry429(client, params) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < RETRY_429_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await client.chat.completions.create(params);
+      } catch (err) {
+        lastErr = err;
+        if (is429Error(err) && attempt < RETRY_429_MAX_ATTEMPTS - 1) {
+          await delay429(attempt);
+          continue;
+        }
+        throw err; // Không phải 429, hoặc đã hết lượt retry
+      }
+    }
+    throw lastErr;
+  }
+
+  // ---------------------------------------------------------------------------
+  // [MULTI-AGENT] Classify intent + build context string cho sub-agents
+  // ---------------------------------------------------------------------------
+
   _buildConversationContext() {
     const messages = this.memory.getMessages();
     if (messages.length === 0) return '';
 
     return messages
-      .slice(-6) // 3 turns = 6 messages (user + assistant)
+      .slice(-6)
       .map((m) => `${m.role === 'user' ? 'User' : 'Agent'}: ${m.content}`)
       .join('\n');
   }
 
-  /**
-   * Delegate task sang sub-agents dựa trên intent.
-   * Trả về kết quả tổng hợp dạng string.
-   *
-   * @param {string} intent   - 'search' | 'analysis' | 'multi'
-   * @param {string} message  - Tin nhắn gốc của user
-   * @param {string} context  - Conversation context
-   * @returns {Promise<string>}
-   */
   async _delegateToSubAgents(intent, message, context) {
+    // Sub-agents trả về string — wrap thành object có toolEvents để stream.js yield
     if (intent === 'search') {
       console.log('[Orchestrator] Delegate → SearchAgent');
-      return await this.searchAgent.run(message, context);
+      const result = await this.searchAgent.run(message, context);
+      return { text: result, agentName: 'search_agent' };
     }
 
     if (intent === 'analysis') {
       console.log('[Orchestrator] Delegate → AnalysisAgent');
-      return await this.analysisAgent.run(message, context);
+      const result = await this.analysisAgent.run(message, context);
+      return { text: result, agentName: 'analysis_agent' };
     }
 
     if (intent === 'multi') {
       console.log('[Orchestrator] Delegate → SearchAgent + AnalysisAgent (parallel)');
-
-      // Chạy song song
       const [searchResult, analysisResult] = await Promise.all([
         this.searchAgent.run(message, context),
         this.analysisAgent.run(message, context),
       ]);
-
-      // Orchestrator tổng hợp bằng LLM
-      return await this._synthesize(message, { search: searchResult, analysis: analysisResult });
+      const text = await this._synthesize(message, { search: searchResult, analysis: analysisResult });
+      return { text, agentName: 'multi_agent' };
     }
 
     throw new Error(`[Orchestrator] Intent không hợp lệ: ${intent}`);
   }
 
-  /**
-   * Tổng hợp kết quả từ nhiều sub-agents bằng LLM.
-   * Chỉ dùng khi intent === 'multi'.
-   *
-   * @param {string} originalMessage
-   * @param {{ search: string, analysis: string }} results
-   * @returns {Promise<string>}
-   */
   async _synthesize(originalMessage, results) {
     console.log('[Orchestrator] Synthesizing results...');
 
@@ -187,27 +224,24 @@ ${results.analysis}
 Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin trùng lặp, trình bày rõ ràng.`;
 
     try {
-      const response = await provider.client.chat.completions.create({
+      // [FIX RETRY 429] Dùng wrapper retry cho synthesize call
+      const response = await this._callLLMWithRetry429(provider.client, {
         model: provider.model,
-        messages: [
-          { role: 'user', content: synthesizePrompt },
-        ],
+        messages: [{ role: 'user', content: synthesizePrompt }],
       });
       return response.choices?.[0]?.message?.content || results.search;
     } catch (err) {
       console.error('[Orchestrator] Synthesize lỗi:', err.message);
-      // Fallback: ghép thủ công nếu LLM lỗi
       return `**Kết quả tìm kiếm:**\n${results.search}\n\n**Phân tích:**\n${results.analysis}`;
     }
   }
 
   // ---------------------------------------------------------------------------
-  // chat() — thêm intent classification, giữ nguyên flow cũ cho 'chat'
+  // chat() — thêm intent classification + retry 429
   // ---------------------------------------------------------------------------
 
   async chat(userMessage) {
     try {
-      // 1. Validate
       if (!userMessage || typeof userMessage !== 'string' || userMessage.trim() === '') {
         return createErrorResponse(
           ErrorCodes.MISSING_MESSAGE,
@@ -215,7 +249,6 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
         );
       }
 
-      // [MULTI-AGENT] 1b. Classify intent trước khi xử lý
       const context = this._buildConversationContext();
       const provider = this._resolveProvider();
       let intentResult;
@@ -227,26 +260,21 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
         intentResult = { intent: 'chat', reason: 'classify error', agents: [] };
       }
 
-      // [MULTI-AGENT] 1c. Nếu cần sub-agents, delegate và trả kết quả
       if (intentResult.intent !== 'chat') {
         this.memory.add({ role: 'user', content: userMessage });
         try {
-          const result = await this._delegateToSubAgents(intentResult.intent, userMessage, context);
-          this.memory.add({ role: 'assistant', content: result });
-          return createSuccessResponse(result, [`${intentResult.intent}_agent`]);
+          const { text, agentName } = await this._delegateToSubAgents(intentResult.intent, userMessage, context);
+          this.memory.add({ role: 'assistant', content: text });
+          return createSuccessResponse(text, [agentName]);
         } catch (err) {
           console.error('[Orchestrator] Sub-agent lỗi, fallback về chat flow:', err.message);
-          // Fallback về chat flow bên dưới nếu sub-agent fail
-          this.memory.getMessages(); // memory.add đã chạy ở trên, không add lại
         }
       }
 
-      // 2. Thêm tin nhắn user vào bộ nhớ ngắn hạn (chỉ khi chưa add ở trên)
       if (intentResult.intent === 'chat') {
         this.memory.add({ role: 'user', content: userMessage });
       }
 
-      // 2b. Context compaction nếu memory gần đầy
       const compactionConfig = this.config.compaction || {};
       try {
         const compactionProvider = this._resolveProvider();
@@ -261,7 +289,6 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
         console.error('[Agent] Compaction lỗi:', err.message);
       }
 
-      // 3. Build context cho LLM
       let queryVector = null;
       let relevantMemories = [];
       try {
@@ -281,7 +308,6 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
 
       const systemPrompt = buildSystemPrompt(relevantMemories);
 
-      // 3b. Document RAG
       let relevantDocs = [];
       try {
         if (queryVector) {
@@ -305,7 +331,7 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
 
       const toolsUsed = [];
 
-      // 4. Vòng lặp ReAct (không đổi)
+      // 4. Vòng lặp ReAct — [FIX RETRY 429] dùng _callLLMWithRetry429
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         console.log(`[Agent] Round ${round + 1}/${MAX_TOOL_ROUNDS}`);
 
@@ -314,14 +340,17 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
 
         let response;
         try {
-          response = await provider.client.chat.completions.create({
+          const isChat = intentResult.intent === 'chat';
+          const toolDefs = isChat ? getChatToolDefinitions() : getToolDefinitions();
+          response = await this._callLLMWithRetry429(provider.client, {
             model: provider.model,
             messages,
-            tools: getToolDefinitions(),
+            tools: toolDefs,
             tool_choice: 'auto',
           });
         } catch (llmError) {
           console.error('[Agent] LLM API Error:', llmError.message);
+          // 429 đã retry hết lượt ở trên — giờ thử fallback provider nếu có
           if (this.router) {
             this._handleProviderFailure(currentProvider);
             console.log('[Agent] Fallback sang provider:', this.router.resolve()?.providerName);
@@ -393,17 +422,15 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
   }
 
   // ---------------------------------------------------------------------------
-  // chatStream() — thêm intent classification, giữ nguyên stream flow cũ
+  // chatStream() — thêm intent classification + retry 429 (không streaming khi retry)
   // ---------------------------------------------------------------------------
 
   async *chatStream(userMessage) {
-    // 1. Validate
     if (!userMessage || typeof userMessage !== 'string' || userMessage.trim() === '') {
       yield { type: 'error', error: { code: ErrorCodes.MISSING_MESSAGE, message: 'Tin nhắn không hợp lệ hoặc rỗng' } };
       return;
     }
 
-    // [MULTI-AGENT] 1b. Classify intent
     const context = this._buildConversationContext();
     const provider = this._resolveProvider();
     let intentResult;
@@ -415,25 +442,22 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
       intentResult = { intent: 'chat', reason: 'classify error', agents: [] };
     }
 
-    // [MULTI-AGENT] 1c. Nếu cần sub-agents, delegate
-    // Stream giả lập bằng cách yield token từ kết quả string
     if (intentResult.intent !== 'chat') {
       this.memory.add({ role: 'user', content: userMessage });
       try {
-        const result = await this._delegateToSubAgents(intentResult.intent, userMessage, context);
-        this.memory.add({ role: 'assistant', content: result });
-        // Yield kết quả như 1 token duy nhất + done — client không phân biệt được nguồn
-        yield { type: 'token', text: result };
-        yield { type: 'done', reply: result, tools_used: [`${intentResult.intent}_agent`] };
-        return;
-      } catch (err) {
+          // Yield tool_call event để AgentPanel hiển thị sub-agent đang chạy
+yield { type: 'tool_call', name: `${intentResult.intent}_agent`, args: { message: userMessage } };
+          const { text, agentName } = await this._delegateToSubAgents(intentResult.intent, userMessage, context);
+          yield { type: 'tool_result', name: agentName, result: text.slice(0, 300) + (text.length > 300 ? '…' : '') };
+          this.memory.add({ role: 'assistant', content: text });
+          yield { type: 'token', text };
+          yield { type: 'done', reply: text, tools_used: [agentName] };
+          return;
+        } catch (err) {
         console.error('[Orchestrator] Sub-agent lỗi, fallback về stream flow:', err.message);
-        // Fallback: tiếp tục stream flow bên dưới
-        // memory đã có user message, không add lại
       }
     }
 
-    // 2. Add to memory + compaction (chỉ khi intent === 'chat' hoặc sub-agent fallback)
     if (intentResult.intent === 'chat') {
       this.memory.add({ role: 'user', content: userMessage });
     }
@@ -452,7 +476,6 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
       console.error('[Agent] Compaction lỗi:', err.message);
     }
 
-    // 3. Semantic search + RAG
     let queryVector = null;
     let relevantMemories = [];
     try {
@@ -472,7 +495,6 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
 
     const systemPrompt = buildSystemPrompt(relevantMemories);
 
-    // 3b. Document RAG
     let relevantDocs = [];
     try {
       if (queryVector) {
@@ -496,22 +518,43 @@ Hãy tổng hợp thành câu trả lời hoàn chỉnh, loại bỏ thông tin 
 
     const toolsUsed = [];
 
-    // 4. ReAct loop with streaming (không đổi)
+    // 4. ReAct loop with streaming — [FIX RETRY 429]
+    // Streaming không thể "retry" giữa stream — nên khi gặp 429 lúc TẠO stream
+    // (trước khi token nào được yield), ta đợi rồi tạo lại stream mới.
+    // Nếu 429 xảy ra GIỮA lúc đang nhận chunk (hiếm, nhưng có thể), ta dừng
+    // round đó và báo lỗi — không thể "tiếp tục" 1 stream đã vỡ giữa đường.
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       console.log(`[Agent] Stream Round ${round + 1}/${MAX_TOOL_ROUNDS}`);
 
-      let stream;
-      try {
-        stream = await this.client.chat.completions.create({
-          model: this.model,
-          messages,
-          tools: getToolDefinitions(),
-          tool_choice: 'auto',
-          stream: true,
-        });
-      } catch (llmError) {
-        console.error('[Agent] LLM API Error:', llmError.message);
-        yield { type: 'error', error: { code: ErrorCodes.LLM_ERROR, message: `Lỗi gọi LLM API: ${llmError.message}` } };
+      let stream = null;
+      let streamCreateErr = null;
+
+      for (let attempt = 0; attempt < RETRY_429_MAX_ATTEMPTS; attempt++) {
+        try {
+          const isChat = intentResult.intent === 'chat';
+          const toolDefs = isChat ? getChatToolDefinitions() : getToolDefinitions();
+          stream = await this.client.chat.completions.create({
+            model: this.model,
+            messages,
+            tools: toolDefs,
+            tool_choice: 'auto',
+            stream: true,
+          });
+          streamCreateErr = null;
+          break;
+        } catch (llmError) {
+          streamCreateErr = llmError;
+          if (is429Error(llmError) && attempt < RETRY_429_MAX_ATTEMPTS - 1) {
+            await delay429(attempt);
+            continue;
+          }
+          break; // Không phải 429, hoặc hết lượt retry
+        }
+      }
+
+      if (streamCreateErr) {
+        console.error('[Agent] LLM API Error:', streamCreateErr.message);
+        yield { type: 'error', error: { code: ErrorCodes.LLM_ERROR, message: `Lỗi gọi LLM API: ${streamCreateErr.message}` } };
         return;
       }
 

@@ -1,3 +1,2 @@
-const { getToolDefinitions, executeTool } = require('./registry');
-
-module.exports = { getToolDefinitions, executeTool };
+const { getToolDefinitions, getChatToolDefinitions, executeTool, tools } = require('./registry');
+module.exports = { getToolDefinitions, getChatToolDefinitions, executeTool, tools };

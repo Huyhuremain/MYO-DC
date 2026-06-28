@@ -1,9 +1,6 @@
 'use strict';
 
-/**
- * Intent Classifier
- * intent: 'chat' | 'search' | 'analysis' | 'multi'
- */
+const { callLLMWithRetry429 } = require('./retry429');
 
 const INTENT_SYSTEM_PROMPT = `Bạn là intent classifier cho một AI agent. Phân loại tin nhắn của user vào đúng 1 trong 4 intent sau:
 
@@ -19,27 +16,29 @@ const INTENT_SYSTEM_PROMPT = `Bạn là intent classifier cho một AI agent. Ph
 - multi: Cần cả search lẫn analysis — vừa tìm thông tin mới từ URL chưa biết vừa phân tích tổng hợp. Ví dụ: "tìm và so sánh các framework JS phổ biến nhất hiện nay".
 
 Trả về JSON hợp lệ, không có markdown, không có giải thích bên ngoài JSON:
-{
-  "intent": "chat" | "search" | "analysis" | "multi",
-  "reason": "lý do ngắn gọn (tối đa 15 từ)",
-  "agents": []
-}`;
+{"intent": "chat" | "search" | "analysis" | "multi", "reason": "lý do ngắn gọn", "agents": []}`;
 
 async function classifyIntent(message, context, client, model) {
+  const wordCount = message.trim().split(/\s+/).length;
+  if (wordCount < 3) {
+    console.log('[Intent] Short message — skip classify, fallback chat');
+    return _fallback('chat', 'short message');
+  }
+
   const userContent = context
     ? `Ngữ cảnh hội thoại gần đây: ${context}\n\nTin nhắn mới: ${message}`
     : message;
 
   let raw;
   try {
-    const response = await client.chat.completions.create({
+    const response = await callLLMWithRetry429(client, {
       model,
       messages: [
         { role: 'system', content: INTENT_SYSTEM_PROMPT },
         { role: 'user', content: userContent },
       ],
       temperature: 0,
-      max_tokens: 150,
+      max_tokens: 1024,
       stream: false,
     });
 
@@ -54,12 +53,18 @@ async function classifyIntent(message, context, client, model) {
 
 function _parseResponse(raw) {
   const VALID_INTENTS = new Set(['chat', 'search', 'analysis', 'multi']);
-
   let parsed;
   try {
-    const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    parsed = JSON.parse(clean);
+    const jsonMatch = raw.match(/\{[\s\S]*?\}/);
+    if (!jsonMatch) throw new Error('No JSON found');
+    parsed = JSON.parse(jsonMatch[0]);
   } catch {
+    // Fallback: extract intent trực tiếp nếu JSON bị truncate
+    const intentMatch = raw.match(/"intent"\s*:\s*"(chat|search|analysis|multi)"/);
+    if (intentMatch) {
+      console.warn('[Intent] JSON truncated — extracted intent:', intentMatch[1]);
+      return { intent: intentMatch[1], reason: 'extracted', agents: [] };
+    }
     console.error('[Intent] JSON parse failed. Raw:', raw);
     return _fallback('chat', 'parse error');
   }
