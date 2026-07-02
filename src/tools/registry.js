@@ -10,6 +10,7 @@ const queryKnowledgeBase = require('./query_knowledge_base');
 const fileReader = require('./file_reader');
 const visionOcr = require('./vision_ocr');
 const manageWatchedUrls = require('./manage_watched_urls');
+const sendEmail = require('./send_email');
 
 const tools = {
   calculator,
@@ -22,6 +23,7 @@ const tools = {
   file_reader: fileReader,
   vision_ocr: visionOcr,
   manage_watched_urls: manageWatchedUrls,
+  send_email: sendEmail,
 };
 
 // Tools nhẹ — dùng cho intent=chat
@@ -31,6 +33,7 @@ const CHAT_TOOL_NAMES = new Set([
   'get_current_time',
   'manage_watched_urls',
   'query_knowledge_base',
+  'send_email',
 ]);
 
 function getToolDefinitions() {

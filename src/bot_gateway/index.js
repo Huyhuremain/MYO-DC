@@ -1,9 +1,9 @@
 const { startTelegramBot } = require('./telegram');
+const { startDiscordBot } = require('./discord');
 
 /**
  * Khởi chạy tất cả bot đã cấu hình.
- * Hiện tại hỗ trợ: Telegram.
- * Phase 3 sẽ thêm: Discord.
+ * Hỗ trợ: Telegram, Discord.
  *
  * @param {object} config - App config
  * @param {import('../core/agent')} agent - Agent instance
@@ -17,9 +17,11 @@ async function startBots(config, agent) {
     bots.telegram = telegramBot;
   }
 
-  // Discord — Phase 3
-  // const discordBot = await startDiscordBot(config, agent);
-  // if (discordBot) bots.discord = discordBot;
+  // Discord
+  const discordBot = await startDiscordBot(config, agent);
+  if (discordBot) {
+    bots.discord = discordBot;
+  }
 
   const count = Object.keys(bots).length;
   if (count === 0) {

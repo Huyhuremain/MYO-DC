@@ -101,6 +101,12 @@ function loadConfig() {
       token: process.env.DISCORD_BOT_TOKEN || '',
     },
 
+// Gmail SMTP — gửi email thật
+    gmail: {
+      user: process.env.GMAIL_USER || '',
+      appPassword: process.env.GMAIL_APP_PASSWORD || '',
+    },
+
     // Paths
     paths,
 

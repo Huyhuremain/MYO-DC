@@ -29,8 +29,6 @@ function writeTokenLog(model, inputTokens, outputTokens) {
   }
 }
 
-// ── Estimate tokens từ text (fallback khi API không trả về usage) ─────────────
-
 function estimateTokens(text) {
   return Math.ceil((text || '').length / 2.3);
 }
@@ -71,13 +69,11 @@ router.get('/chat/stream', async (req, res) => {
       if (event.type === 'done') {
         res.write('retry: 86400000\n\n');
 
-        // Ghi token log
         const u = event.usage || {};
         const inputTokens = u.input_tokens || u.prompt_tokens || estimateTokens(message);
         const outputTokens = u.output_tokens || u.completion_tokens || estimateTokens(event.reply);
         writeTokenLog(model, inputTokens, outputTokens);
 
-        // Auto-save conversation
         const messages = agent.memory.getMessages();
         const { client, model: resolvedModel } = agent._resolveProvider();
         setImmediate(() => {
@@ -153,11 +149,10 @@ router.get('/stats', (req, res) => {
     const db = getDb();
     const { period = 'month' } = req.query;
 
-    // Xác định khoảng thời gian
     const now = new Date();
     let dateFrom;
     if (period === 'today') {
-      dateFrom = now.toISOString().slice(0, 10); // YYYY-MM-DD
+      dateFrom = now.toISOString().slice(0, 10);
     } else if (period === 'week') {
       const d = new Date(now);
       d.setDate(d.getDate() - 7);
@@ -167,10 +162,9 @@ router.get('/stats', (req, res) => {
     } else if (period === 'year') {
       dateFrom = `${now.getFullYear()}-01-01`;
     } else {
-      dateFrom = '2000-01-01'; // all time
+      dateFrom = '2000-01-01';
     }
 
-    // Tổng theo period
     const summary = db.prepare(`
       SELECT
         COUNT(*) as total_calls,
@@ -181,7 +175,6 @@ router.get('/stats', (req, res) => {
       WHERE timestamp >= ?
     `).get(`${dateFrom}T00:00:00.000Z`);
 
-    // Theo ngày (30 ngày gần nhất)
     const daily = db.prepare(`
       SELECT
         substr(timestamp, 1, 10) as date,
@@ -196,7 +189,6 @@ router.get('/stats', (req, res) => {
       LIMIT 30
     `).all(`${dateFrom}T00:00:00.000Z`);
 
-    // Theo tháng (12 tháng gần nhất)
     const monthly = db.prepare(`
       SELECT
         substr(timestamp, 1, 7) as month,
@@ -225,6 +217,49 @@ router.get('/stats', (req, res) => {
     });
   } catch (err) {
     console.error('[API/stats] Lỗi:', err.message);
+    return res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// ── GET /api/briefing ──────────────────────────────────────────────────────
+
+router.get('/briefing', (req, res) => {
+  try {
+    const db = getDb();
+    const briefing = db.prepare(`
+      SELECT id, created_at, summary, doc_count, seen
+      FROM startup_briefings
+      WHERE seen = 0
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get();
+
+    if (!briefing) {
+      return res.json({ status: 'ok', briefing: null });
+    }
+
+    return res.json({ status: 'ok', briefing });
+  } catch (err) {
+    console.error('[API/briefing] Lỗi:', err.message);
+    return res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// ── POST /api/briefing/dismiss ───────────────────────────────────────────────
+
+router.post('/briefing/dismiss', express.json(), (req, res) => {
+  try {
+    const db = getDb();
+    const { id } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ status: 'error', message: 'Thiếu id' });
+    }
+
+    db.prepare(`UPDATE startup_briefings SET seen = 1 WHERE id = ?`).run(id);
+    return res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('[API/briefing/dismiss] Lỗi:', err.message);
     return res.status(500).json({ status: 'error', message: err.message });
   }
 });

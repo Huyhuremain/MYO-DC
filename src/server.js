@@ -6,6 +6,8 @@ const { startServer } = require('./api');
 const { startBots } = require('./bot_gateway');
 const { startScheduler } = require('./core/crawler/scheduler');
 const { initCrawler } = require('./tools/manage_watched_urls');
+const { initEmailTransporter } = require('./tools/send_email');
+const { generateStartupBriefing } = require('./core/startup_briefing');
 
 async function main() {
   // 1. Load config
@@ -27,14 +29,15 @@ async function main() {
   console.log('=================================\n');
 
   // 3. Inject crawler client vào manage_watched_urls tool
-  // [FIX] Bỏ config.llm.model — crawler không dùng LLM nữa
   initCrawler(
     agent.embeddingClient,
     config.embedding?.model || 'text-embedding-3-small'
   );
 
+  // 3b. Khởi tạo Gmail SMTP transporter cho send_email tool
+  initEmailTransporter(config.gmail?.user, config.gmail?.appPassword);
+
   // 4. Khởi động scheduler crawl tự động (7 sáng mỗi ngày)
-  // [FIX] Bỏ config.llm.model — crawler không dùng LLM nữa
   startScheduler(
     agent.embeddingClient,
     config.embedding?.model || 'text-embedding-3-small',
@@ -46,6 +49,13 @@ async function main() {
 
   // 6. Start bot gateway
   await startBots(config, agent);
+
+  // 7. Tạo briefing tóm tắt tin tức mới (chạy ngầm, không block startup)
+  setImmediate(() => {
+    generateStartupBriefing(agent).catch(err =>
+      console.error('[Briefing] Lỗi không mong đợi:', err.message)
+    );
+  });
 }
 
 main().catch((err) => {

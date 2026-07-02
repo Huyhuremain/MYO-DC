@@ -256,4 +256,13 @@ export const CSS = `
   .stats-table-header { display: grid; grid-template-columns: 2fr 1fr 1.5fr 1.5fr; padding: 6px 10px; background: var(--user-bg); font-size: 11px; font-weight: 600; color: var(--muted); }
   .stats-table-row { display: grid; grid-template-columns: 2fr 1fr 1.5fr 1.5fr; padding: 7px 10px; font-size: 12px; color: var(--text); border-top: 1px solid var(--border); font-family: var(--mono); }
   .stats-table-row:hover { background: var(--user-bg); }
+
+  /* ── Startup Briefing Banner ───────────────────────────────── */
+  .briefing-banner { display: flex; gap: 12px; align-items: flex-start; background: #f0fdf4; border-bottom: 1px solid #bbf7d0; padding: 14px 20px; }
+  .briefing-banner-icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .briefing-banner-content { flex: 1; min-width: 0; }
+  .briefing-banner-title { font-size: 13px; font-weight: 600; color: #15803d; margin-bottom: 4px; }
+  .briefing-banner-text { font-size: 13px; color: var(--text); line-height: 1.6; white-space: pre-wrap; }
+  .briefing-banner-close { background: none; border: none; cursor: pointer; color: #166534; font-size: 16px; padding: 2px 6px; border-radius: 4px; flex-shrink: 0; }
+  .briefing-banner-close:hover { background: #dcfce7; }
 `;

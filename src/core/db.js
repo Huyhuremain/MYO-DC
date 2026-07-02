@@ -91,6 +91,23 @@ function _initSchema(db) {
 
     CREATE INDEX IF NOT EXISTS idx_token_logs_timestamp ON token_logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_token_logs_model ON token_logs(model);
+
+    -- Startup briefing — tóm tắt tin tức mới mỗi khi server khởi động
+    CREATE TABLE IF NOT EXISTS startup_briefings (
+      id          TEXT PRIMARY KEY,
+      created_at  TEXT NOT NULL,
+      summary     TEXT NOT NULL,
+      doc_count   INTEGER NOT NULL DEFAULT 0,
+      seen        INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Đánh dấu lần server start gần nhất
+    CREATE TABLE IF NOT EXISTS app_state (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_startup_briefings_seen ON startup_briefings(seen);
   `);
 }
 

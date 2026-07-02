@@ -11,6 +11,9 @@ let _cache = null;
 let _cacheTime = 0;
 const CACHE_TTL = 60_000;
 
+// [Phương án 1] Giới hạn RAG chỉ search trong N ngày gần nhất
+const RAG_WINDOW_DAYS = 30;
+
 function _invalidateCache() { _cache = null; _cacheTime = 0; }
 
 function loadStore() {
@@ -28,20 +31,11 @@ function saveStore(_store) {
   console.warn('[DocumentStore] saveStore() không còn cần thiết với SQLite.');
 }
 
-/**
- * Lưu document mới — KHÔNG ghi đè record cũ.
- * Mỗi lần crawl/ingest = 1 record riêng biệt.
- *
- * @param {string} filename
- * @param {Array<{ id, text, vector, index }>} chunks
- * @param {object} meta - { url, label, crawl_date }
- * @returns {number} số chunks đã lưu
- */
 function saveDocument(filename, chunks, meta = {}) {
   const db = getDb();
   const docId = crypto.randomUUID();
   const now = new Date().toISOString();
-  const crawlDate = meta.crawl_date || now.slice(0, 10); // 'YYYY-MM-DD'
+  const crawlDate = meta.crawl_date || now.slice(0, 10);
   const url = meta.url || '';
   const label = meta.label || '';
 
@@ -59,11 +53,7 @@ function saveDocument(filename, chunks, meta = {}) {
     for (const chunk of chunks) {
       insertChunk.run(
         `${docId}_${chunk.index ?? chunk.id}`,
-        docId,
-        filename,
-        url,
-        label,
-        crawlDate,
+        docId, filename, url, label, crawlDate,
         chunk.text,
         JSON.stringify(chunk.vector || []),
         chunk.index ?? 0
@@ -77,30 +67,87 @@ function saveDocument(filename, chunks, meta = {}) {
 }
 
 /**
- * Lấy chunks cho RAG — chỉ lấy crawl_date MỚI NHẤT của mỗi URL.
- * Fallback: nếu URL trống (ingest_document) → lấy tất cả.
+ * Lấy chunks cho RAG search.
+ * [Phương án 1] Chỉ lấy chunks trong RAG_WINDOW_DAYS ngày gần nhất.
+ * [Phương án 2] SQL-first filter — chỉ lấy crawl_date mới nhất của mỗi URL,
+ * giới hạn theo date window TRONG SQL trước khi load vào RAM.
+ *
+ * @param {string} [queryText] - Text câu hỏi, dùng để pre-filter bằng LIKE (Phương án 2)
  */
-function getAllChunks() {
+function getAllChunks(queryText = '') {
+  const cacheKey = queryText ? `kw:${queryText.slice(0, 50)}` : 'default';
   const now = Date.now();
-  if (_cache && now - _cacheTime < CACHE_TTL) return _cache;
+
+  if (_cache && _cache.key === cacheKey && now - _cacheTime < CACHE_TTL) {
+    return _cache.data;
+  }
 
   const db = getDb();
+  const windowDate = new Date();
+  windowDate.setDate(windowDate.getDate() - RAG_WINDOW_DAYS);
+  const dateFrom = windowDate.toISOString().slice(0, 10);
 
-  const rows = db.prepare(`
-    SELECT c.id, c.text, c.filename, c.url, c.label, c.crawl_date, c.vector
-    FROM chunks c
-    INNER JOIN documents d ON c.doc_id = d.id
-    WHERE
-      -- Với web documents: chỉ lấy crawl_date mới nhất của mỗi URL
-      (c.url = '' OR d.crawl_date = (
-        SELECT MAX(d2.crawl_date)
-        FROM documents d2
-        WHERE d2.url = d.url
-      ))
-    ORDER BY c.filename, c.chunk_index
-  `).all();
+  // [Phương án 2] Pre-filter bằng keyword trong SQL nếu có queryText đủ dài
+  // Giảm số rows phải load vào RAM trước khi tính cosine similarity
+  const keywords = (queryText || '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(w => w.length > 2)
+    .slice(0, 5); // tối đa 5 keyword để tránh query quá dài
 
-  _cache = rows.map(row => ({
+  let rows;
+
+  if (keywords.length > 0) {
+    // Build OR conditions cho từng keyword — match càng nhiều keyword, càng có khả năng liên quan
+    const likeConditions = keywords.map(() => `lower(c.text) LIKE lower(?)`).join(' OR ');
+    const likeParams = keywords.map(kw => `%${kw}%`);
+
+    rows = db.prepare(`
+      SELECT c.id, c.text, c.filename, c.url, c.label, c.crawl_date, c.vector
+      FROM chunks c
+      INNER JOIN documents d ON c.doc_id = d.id
+      WHERE
+        (c.url = '' OR c.crawl_date >= ?)
+        AND (c.url = '' OR d.crawl_date = (
+          SELECT MAX(d2.crawl_date) FROM documents d2 WHERE d2.url = d.url
+        ))
+        AND (${likeConditions})
+      ORDER BY c.filename, c.chunk_index
+      LIMIT 1000
+    `).all(dateFrom, ...likeParams);
+
+    // Fallback: nếu keyword filter quá hẹp (ít hơn topK cần), nới ra lấy theo date window thôi
+    if (rows.length < 20) {
+      rows = db.prepare(`
+        SELECT c.id, c.text, c.filename, c.url, c.label, c.crawl_date, c.vector
+        FROM chunks c
+        INNER JOIN documents d ON c.doc_id = d.id
+        WHERE
+          (c.url = '' OR c.crawl_date >= ?)
+          AND (c.url = '' OR d.crawl_date = (
+            SELECT MAX(d2.crawl_date) FROM documents d2 WHERE d2.url = d.url
+          ))
+        ORDER BY c.filename, c.chunk_index
+        LIMIT 2000
+      `).all(dateFrom);
+    }
+  } else {
+    // Không có query text — chỉ áp dụng date window (Phương án 1)
+    rows = db.prepare(`
+      SELECT c.id, c.text, c.filename, c.url, c.label, c.crawl_date, c.vector
+      FROM chunks c
+      INNER JOIN documents d ON c.doc_id = d.id
+      WHERE
+        (c.url = '' OR c.crawl_date >= ?)
+        AND (c.url = '' OR d.crawl_date = (
+          SELECT MAX(d2.crawl_date) FROM documents d2 WHERE d2.url = d.url
+        ))
+      ORDER BY c.filename, c.chunk_index
+      LIMIT 2000
+    `).all(dateFrom);
+  }
+
+  const data = rows.map(row => ({
     id: row.id,
     text: row.text,
     filename: row.filename,
@@ -109,9 +156,11 @@ function getAllChunks() {
     crawl_date: row.crawl_date,
     vector: JSON.parse(row.vector),
   }));
+
+  _cache = { key: cacheKey, data };
   _cacheTime = now;
 
-  return _cache;
+  return data;
 }
 
 function listDocuments() {
@@ -131,5 +180,5 @@ function removeDocument(filename) {
 module.exports = {
   loadStore, saveStore, saveDocument,
   getAllChunks, listDocuments, removeDocument,
-  DOC_STORE_DIR, _invalidateCache,
+  DOC_STORE_DIR, _invalidateCache, RAG_WINDOW_DAYS,
 };

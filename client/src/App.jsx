@@ -5,7 +5,8 @@ import { API_BASE, parseUsage } from "./utils";
 import { CSS } from "./Styles";
 
 export default function App() {
-  const [panelExpanded, setPanelExpanded] = useState(false);  // ← trong này
+  const [panelExpanded, setPanelExpanded] = useState(false);
+  const [briefing, setBriefing] = useState(null);
   const [messages, setMessages] = useState([{
     id: 0, role: "ai", createdAt: new Date(), steps: [],
     content: "Xin chào! Tôi là DaisyClaw, trợ lý AI cá nhân của bạn. Bạn cần gì?",
@@ -35,6 +36,33 @@ export default function App() {
     const t = setInterval(check, 30000);
     return () => clearInterval(t);
   }, []);
+
+  // Fetch startup briefing — chỉ 1 lần khi mở app
+  useEffect(() => {
+    const fetchBriefing = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/briefing`, { cache: "no-store" });
+        const d = await r.json();
+        if (d.status === "ok" && d.briefing) {
+          setBriefing(d.briefing);
+        }
+      } catch { /* im lặng nếu lỗi */ }
+    };
+    fetchBriefing();
+  }, []);
+
+  const dismissBriefing = async () => {
+    if (!briefing) return;
+    const id = briefing.id;
+    setBriefing(null);
+    try {
+      await fetch(`${API_BASE}/api/briefing/dismiss`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+    } catch { /* im lặng */ }
+  };
 
   const addMessage = useCallback((msg) => {
     setMessages(prev => [...prev, { id: msgIdRef.current++, createdAt: new Date(), ...msg }]);
@@ -192,19 +220,32 @@ export default function App() {
           </div>
         )}
 
+        {briefing && (
+          <div className="briefing-banner">
+            <div className="briefing-banner-icon">📰</div>
+            <div className="briefing-banner-content">
+              <div className="briefing-banner-title">
+                Có {briefing.doc_count} tin tức mới trong lúc bạn vắng mặt
+              </div>
+              <div className="briefing-banner-text">{briefing.summary}</div>
+            </div>
+            <button className="briefing-banner-close" onClick={dismissBriefing}>✕</button>
+          </div>
+        )}
+
         <div className="workspace-layout">
-  {!panelExpanded && (
-    <ChatWindow
-      messages={messages}
-      onSend={sendMessage}
-      loading={loading}
-      serverOnline={serverOnline}
-      pendingImage={pendingImage}
-      setPendingImage={setPendingImage}
-    />
-  )}
-  <AgentPanel latestAIMessage={latestAIMessage} panelExpanded={panelExpanded} setPanelExpanded={setPanelExpanded} />
-</div>
+          {!panelExpanded && (
+            <ChatWindow
+              messages={messages}
+              onSend={sendMessage}
+              loading={loading}
+              serverOnline={serverOnline}
+              pendingImage={pendingImage}
+              setPendingImage={setPendingImage}
+            />
+          )}
+          <AgentPanel latestAIMessage={latestAIMessage} panelExpanded={panelExpanded} setPanelExpanded={setPanelExpanded} />
+        </div>
       </div>
     </>
   );
